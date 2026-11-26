@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.IO.Compression;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -10,8 +9,6 @@ using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.SceneManagement;
-// UnityEngine.CompressionLevel 과 이름이 겹쳐서 별칭 사용
-using ZipLevel = System.IO.Compression.CompressionLevel;
 
 namespace Roshikey.UnityAutoBackup
 {
@@ -22,6 +19,10 @@ namespace Roshikey.UnityAutoBackup
         public static float CurrentProgress => Mathf.Clamp01(_progress);
         public static string CurrentStatus => _status ?? "";
         public static event Action Finished;
+
+        /// <summary>백업이 끝나면 Unity를 종료할 예정인지</summary>
+        public static bool QuitPending { get; private set; }
+        static bool _allowQuit;
 
         static volatile float _progress;
         static volatile string _status;
@@ -60,11 +61,68 @@ namespace Roshikey.UnityAutoBackup
 
         static bool OnWantsToQuit()
         {
-            if (!IsRunning) return true;
-            bool quit = EditorUtility.DisplayDialog("Unity Auto Backup",
-                "백업이 진행 중입니다. 백업을 취소하고 종료할까요?", "취소하고 종료", "기다리기");
-            if (quit) Cancel();
-            return quit;
+            if (_allowQuit) return true;
+
+            // 이미 백업이 돌고 있을 때
+            if (IsRunning)
+            {
+                if (QuitPending)
+                {
+                    bool now = EditorUtility.DisplayDialog("Unity Auto Backup",
+                        "종료 전 백업이 진행 중입니다. 끝나면 자동으로 종료됩니다.\n\n백업을 취소하고 바로 종료할까요?",
+                        "취소하고 바로 종료", "기다리기");
+                    if (!now) return false;
+                    CancelAndQuit();
+                    return true;
+                }
+
+                int choice = EditorUtility.DisplayDialogComplex("Unity Auto Backup",
+                    "백업이 진행 중입니다.", "끝나면 종료", "기다리기", "취소하고 종료");
+                if (choice == 0) { QuitPending = true; ShowWindow(); return false; }
+                if (choice == 2) { CancelAndQuit(); return true; }
+                return false;
+            }
+
+            var s = BackupSettings.Instance;
+            if (!s.backupOnQuit) return true;
+
+            // 방금 백업했으면 또 할 필요 없음
+            if (s.lastBackupUtcTicks > 0 &&
+                (DateTime.UtcNow - new DateTime(s.lastBackupUtcTicks, DateTimeKind.Utc)).TotalMinutes < 1)
+                return true;
+
+            // 저장 안 된 씬이 있으면 먼저 물어보기 (취소 누르면 종료도 취소)
+            if (!EditorSceneManager.SaveCurrentModifiedScenesIfUserWantsTo()) return false;
+            AssetDatabase.SaveAssets();
+
+            if (!StartBackup("종료 전 백업")) return true;
+            QuitPending = true;
+            ShowWindow();
+            return false;
+        }
+
+        static void ShowWindow()
+        {
+            EditorApplication.delayCall += () => UnityAutoBackupWindow.Open();
+        }
+
+        /// <summary>백업을 취소하고 즉시 종료</summary>
+        public static void CancelAndQuit()
+        {
+            Cancel();
+            QuitPending = false;
+            _allowQuit = true;
+            if (_reloadLocked) { EditorApplication.UnlockReloadAssemblies(); _reloadLocked = false; }
+        }
+
+        /// <summary>종료 예약만 취소 (백업은 계속)</summary>
+        public static void AbortQuit() => QuitPending = false;
+
+        static void QuitNow()
+        {
+            _allowQuit = true;
+            // Exit()가 아니라 Quit()을 써서 Unity의 일반 종료 과정(저장 확인 등)을 그대로 거침
+            EditorApplication.delayCall += () => EditorApplication.Quit();
         }
 
         // ───────────────────────── 공개 API ─────────────────────────
@@ -81,7 +139,12 @@ namespace Roshikey.UnityAutoBackup
                 .Where(p => !string.IsNullOrWhiteSpace(p))
                 .Select(p => p.Trim().Replace('\\', '/').Trim('/'))
                 .ToList();
-            var level = s.fastestCompression ? ZipLevel.Fastest : ZipLevel.Optimal;
+            var mode = (ZipMode)Mathf.Clamp(s.compressionMode, 0, 2);
+            var storeExts = new HashSet<string>(
+                (s.storeExtensions ?? "").Split(new[] { ',', ' ', ';' }, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(x => x.Trim().TrimStart('.', '*').ToLowerInvariant()),
+                StringComparer.OrdinalIgnoreCase);
+            int threads = s.threadCount > 0 ? s.threadCount : Math.Max(1, SystemInfo.processorCount - 1);
             int max = s.maxBackups;
 
             try
@@ -108,7 +171,7 @@ namespace Roshikey.UnityAutoBackup
             EditorApplication.LockReloadAssemblies();
             _reloadLocked = true;
 
-            Task.Run(() => Run(root, name, folder, excludes, level, max, token));
+            Task.Run(() => Run(root, name, folder, excludes, mode, storeExts, threads, max, token));
             EditorApplication.update += Poll;
             return true;
         }
@@ -173,6 +236,21 @@ namespace Roshikey.UnityAutoBackup
             _cts = null;
             IsRunning = false;
             Finished?.Invoke();
+
+            if (QuitPending)
+            {
+                QuitPending = false;
+                if (_resultSuccess || _resultCanceled)
+                {
+                    QuitNow();
+                }
+                else if (EditorUtility.DisplayDialog("Unity Auto Backup",
+                             "종료 전 백업에 실패했습니다. (자세한 내용은 콘솔 참고)\n그래도 종료할까요?",
+                             "종료", "종료 안 함"))
+                {
+                    QuitNow();
+                }
+            }
         }
 
         static void Complete(bool success, bool canceled, string message)
@@ -186,13 +264,20 @@ namespace Roshikey.UnityAutoBackup
         // ───────────────────────── 백그라운드 작업 ─────────────────────────
 
         static void Run(string root, string name, string folder, List<string> excludes,
-                        ZipLevel level, int max, CancellationToken token)
+                        ZipMode mode, HashSet<string> storeExts, int threads, int max, CancellationToken token)
         {
             string tmpPath = null;
             try
             {
                 var files = CollectFiles(root, folder, excludes, token);
                 long total = files.Sum(f => f.Length);
+                var sources = files.Select(f => new ZipSource
+                {
+                    FullPath = f.FullName,
+                    EntryName = Relative(root, f.FullName),
+                    Length = f.Length,
+                    LastWriteTime = f.LastWriteTime,
+                }).ToList();
 
                 string stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
                 string finalPath = Path.Combine(folder, $"{name}_{stamp}.zip");
@@ -200,56 +285,14 @@ namespace Roshikey.UnityAutoBackup
                     finalPath = Path.Combine(folder, $"{name}_{stamp}_{n}.zip");
                 tmpPath = finalPath + ".tmp";
 
-                long done = 0;
-                int skipped = 0;
-                var buffer = new byte[1 << 20];
-
-                using (var fs = new FileStream(tmpPath, FileMode.Create, FileAccess.Write, FileShare.None))
-                using (var zip = new ZipArchive(fs, ZipArchiveMode.Create))
-                {
-                    for (int i = 0; i < files.Count; i++)
-                    {
-                        token.ThrowIfCancellationRequested();
-                        var fi = files[i];
-                        string rel = Relative(root, fi.FullName);
-                        _status = $"({i + 1}/{files.Count}) {rel}";
-
-                        FileStream src;
-                        try
-                        {
-                            // 다른 프로그램이 열고 있는 파일도 최대한 읽기
-                            src = new FileStream(fi.FullName, FileMode.Open, FileAccess.Read,
-                                                 FileShare.ReadWrite | FileShare.Delete);
-                        }
-                        catch (Exception)
-                        {
-                            skipped++;
-                            done += fi.Length;
-                            continue;
-                        }
-
-                        using (src)
-                        {
-                            var entry = zip.CreateEntry(rel, level);
-                            try { entry.LastWriteTime = fi.LastWriteTime; } catch { /* 1980년 이전 날짜 등 */ }
-                            using (var dst = entry.Open())
-                            {
-                                try
-                                {
-                                    int read;
-                                    while ((read = src.Read(buffer, 0, buffer.Length)) > 0)
-                                    {
-                                        token.ThrowIfCancellationRequested();
-                                        dst.Write(buffer, 0, read);
-                                        done += read;
-                                        _progress = total > 0 ? (float)((double)done / total) : 1f;
-                                    }
-                                }
-                                catch (IOException) { skipped++; }
-                            }
-                        }
-                    }
-                }
+                int count = sources.Count;
+                var started = DateTime.UtcNow;
+                var zr = FastZip.Create(tmpPath, sources, mode, storeExts, threads,
+                    done => _progress = total > 0 ? (float)((double)done / total) : 1f,
+                    (i, rel) => _status = $"({i + 1}/{count}) {rel}",
+                    token);
+                int skipped = zr.Skipped;
+                double secs = (DateTime.UtcNow - started).TotalSeconds;
 
                 File.Move(tmpPath, finalPath);
                 tmpPath = null;
@@ -258,7 +301,7 @@ namespace Roshikey.UnityAutoBackup
                 Rotate(folder, name, max);
 
                 long size = new FileInfo(finalPath).Length;
-                string msg = $"백업 완료: {Path.GetFileName(finalPath)} ({FormatSize(size)}, 파일 {files.Count - skipped}개";
+                string msg = $"백업 완료: {Path.GetFileName(finalPath)} ({FormatSize(size)}, 파일 {zr.Written}개, {secs:0.0}초";
                 if (skipped > 0) msg += $", 읽기 실패로 건너뜀 {skipped}개";
                 Complete(true, false, msg + ")\n" + finalPath);
             }

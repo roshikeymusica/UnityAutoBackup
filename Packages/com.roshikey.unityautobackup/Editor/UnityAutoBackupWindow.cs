@@ -12,9 +12,15 @@ namespace Roshikey.UnityAutoBackup
         Vector2 _scroll;
         List<FileInfo> _backups = new List<FileInfo>();
         string _excludeText;
+        static readonly GUIContent[] CompressionLabels =
+        {
+            new GUIContent("압축 안 함 (가장 빠름)"),
+            new GUIContent("빠른 압축 (추천)"),
+            new GUIContent("최대 압축 (느림)"),
+        };
 
         [MenuItem("Tools/Unity Auto Backup/백업 창 열기", priority = 0)]
-        static void Open() => GetWindow<UnityAutoBackupWindow>("Unity Auto Backup");
+        internal static void Open() => GetWindow<UnityAutoBackupWindow>("Unity Auto Backup");
 
         [MenuItem("Tools/Unity Auto Backup/지금 백업", priority = 1)]
         static void BackupNow()
@@ -63,7 +69,19 @@ namespace Roshikey.UnityAutoBackup
                 Rect r = GUILayoutUtility.GetRect(18, 20, GUILayout.ExpandWidth(true));
                 EditorGUI.ProgressBar(r, BackupRunner.CurrentProgress, $"백업 중... {BackupRunner.CurrentProgress * 100f:0}%");
                 EditorGUILayout.LabelField(BackupRunner.CurrentStatus, EditorStyles.miniLabel);
-                if (GUILayout.Button("취소")) BackupRunner.Cancel();
+                if (BackupRunner.QuitPending)
+                {
+                    EditorGUILayout.HelpBox("백업이 끝나면 Unity가 자동으로 종료됩니다.", MessageType.Info);
+                    EditorGUILayout.BeginHorizontal();
+                    if (GUILayout.Button("백업 취소하고 바로 종료"))
+                    {
+                        BackupRunner.CancelAndQuit();
+                        EditorApplication.Quit();
+                    }
+                    if (GUILayout.Button("종료 안 함 (백업은 계속)")) BackupRunner.AbortQuit();
+                    EditorGUILayout.EndHorizontal();
+                }
+                else if (GUILayout.Button("취소")) BackupRunner.Cancel();
             }
             else
             {
@@ -78,6 +96,8 @@ namespace Roshikey.UnityAutoBackup
             EditorGUILayout.LabelField("설정", EditorStyles.boldLabel);
             EditorGUI.BeginChangeCheck();
 
+            s.backupOnQuit = EditorGUILayout.Toggle(
+                new GUIContent("Unity 종료 시 백업", "닫을 때 백업을 먼저 하고, 끝나면 자동으로 종료합니다"), s.backupOnQuit);
             s.backupOnSceneSave = EditorGUILayout.Toggle("씬 저장 시 자동 백업", s.backupOnSceneSave);
             using (new EditorGUI.DisabledScope(!s.backupOnSceneSave))
             {
@@ -87,8 +107,18 @@ namespace Roshikey.UnityAutoBackup
             }
             s.maxBackups = Mathf.Max(0, EditorGUILayout.IntField(
                 new GUIContent("최대 보관 개수", "넘으면 오래된 것부터 삭제. 0 = 무제한"), s.maxBackups));
-            s.fastestCompression = EditorGUILayout.Toggle(
-                new GUIContent("빠른 압축", "끄면 용량은 조금 줄지만 훨씬 느려집니다"), s.fastestCompression);
+s.compressionMode = EditorGUILayout.Popup(
+                new GUIContent("압축 방식", "압축 안 함이 제일 빠르지만 용량이 큽니다"),
+                Mathf.Clamp(s.compressionMode, 0, 2), CompressionLabels);
+            using (new EditorGUI.DisabledScope(s.compressionMode == 0))
+            {
+                s.storeExtensions = EditorGUILayout.TextField(
+                    new GUIContent("압축 건너뛸 확장자", "이미 압축된 형식은 다시 압축해도 거의 안 줄어서 그냥 저장합니다 (쉼표로 구분)"),
+                    s.storeExtensions);
+            }
+            s.threadCount = Mathf.Clamp(EditorGUILayout.IntField(
+                new GUIContent("압축 스레드 수", $"0 = 자동 (지금 PC: {Mathf.Max(1, SystemInfo.processorCount - 1)}개)"),
+                s.threadCount), 0, 64);
 
             EditorGUILayout.BeginHorizontal();
             s.backupFolder = EditorGUILayout.TextField("백업 폴더", s.backupFolder);

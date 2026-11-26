@@ -12,9 +12,15 @@ namespace Roshikey.UnityAutoBackup
     internal class BackupSettings
     {
         public bool backupOnSceneSave = true;
+        public bool backupOnQuit = true;
         public int minIntervalMinutes = 10;
         public int maxBackups = 20;
-        public bool fastestCompression = true;
+        /// <summary>0 = 압축 안 함, 1 = 빠른 압축, 2 = 최대 압축</summary>
+        public int compressionMode = 1;
+        /// <summary>압축 스레드 수. 0 = 자동(코어 수 - 1)</summary>
+        public int threadCount = 0;
+        /// <summary>이미 압축된 형식이라 다시 압축해도 안 줄어드는 확장자 → 그냥 저장</summary>
+        public string storeExtensions = "png, jpg, jpeg, webp, exr, zip, 7z, rar, gz, unitypackage, mp3, ogg, m4a, aac, flac, opus, mp4, webm, mov, mkv, avi, ktx2";
         public string backupFolder = "";
         public List<string> excludedPaths = new List<string>
         {
