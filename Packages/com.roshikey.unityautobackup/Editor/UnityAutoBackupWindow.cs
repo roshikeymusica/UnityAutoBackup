@@ -76,7 +76,7 @@ namespace Roshikey.UnityAutoBackup
                     if (GUILayout.Button("백업 취소하고 바로 종료"))
                     {
                         BackupRunner.CancelAndQuit();
-                        EditorApplication.Quit();
+                        EditorApplication.delayCall += BackupRunner.RequestQuit;
                     }
                     if (GUILayout.Button("종료 안 함 (백업은 계속)")) BackupRunner.AbortQuit();
                     EditorGUILayout.EndHorizontal();

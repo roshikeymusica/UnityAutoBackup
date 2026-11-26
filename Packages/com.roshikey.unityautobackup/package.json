@@ -1,6 +1,6 @@
 {
   "name": "com.roshikey.unityautobackup",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "displayName": "Unity Auto Backup",
   "description": "씬을 저장할 때(설정으로 끌 수 있음) 또는 수동 버튼을 누를 때 현재 Unity 프로젝트 폴더를 zip으로 압축해 백업합니다.",
   "unity": "2020.3",

@@ -120,9 +120,27 @@ namespace Roshikey.UnityAutoBackup
 
         static void QuitNow()
         {
+            EditorApplication.delayCall += RequestQuit;
+        }
+
+        /// <summary>
+        /// Unity 종료 요청. Unity엔 일반 종료 API가 없어서 File > Exit 메뉴를 실행해 정상 종료 과정을 거침.
+        /// 메뉴가 없으면(macOS 등) 저장 확인 후 강제 종료.
+        /// </summary>
+        public static void RequestQuit()
+        {
             _allowQuit = true;
-            // Exit()가 아니라 Quit()을 써서 Unity의 일반 종료 과정(저장 확인 등)을 그대로 거침
-            EditorApplication.delayCall += () => EditorApplication.Quit();
+            if (EditorApplication.ExecuteMenuItem("File/Exit")) return;
+
+            if (EditorSceneManager.SaveCurrentModifiedScenesIfUserWantsTo())
+            {
+                AssetDatabase.SaveAssets();
+                EditorApplication.Exit(0);
+            }
+            else
+            {
+                _allowQuit = false;
+            }
         }
 
         // ───────────────────────── 공개 API ─────────────────────────
